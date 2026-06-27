@@ -391,52 +391,76 @@ def section_ev(draws, cost=8.0, jackpot=4_000_000, tickets_sold=2_000_000):
 #  6. TICKET GENERATOR  (uniform win-prob, optimised for unpopularity)
 # ═══════════════════════════════════════════════════════════════════════
 
-def generate_tickets(draws, n_tickets=6, tickets_sold=2_000_000, pool=60000, seed=None):
+def generate_tickets(draws, n_tickets=6, tickets_sold=2_000_000, pool=150000, seed=None):
     print("=" * 72)
-    print("  5. SUGGESTED TICKETS  (max expected payout per win — NOT better odds)")
+    print("  5. SUGGESTED TICKETS  (natural-looking, tilted away from the crowd)")
     print("=" * 72)
-    rng = random.Random(seed if seed is not None else
-                        (len(draws) + sum(draws[-1]["nums"]) if draws else 0))
+    # Non-deterministic by default → different valid tickets every run.
+    rng = random.Random(seed) if seed is not None else random.Random(os.urandom(8))
+
     history = {tuple(d["nums"]) for d in draws}
     recent = [set(d["nums"]) for d in draws[-12:]]
+    sums = sorted(sum(d["nums"]) for d in draws)
+    s_lo, s_hi = sums[len(sums) // 10], sums[len(sums) * 9 // 10]    # central 80% band
 
-    # Build a large pool of uniformly-random valid tickets, score by popularity.
+    def is_natural(tk):
+        """Looks like a real, balanced draw — NOT an all-high/all-low pattern."""
+        s = sum(tk)
+        if not (s_lo <= s <= s_hi):
+            return False
+        low = sum(1 for n in tk if n <= 24)
+        if not (2 <= low <= 4):                       # balanced halves (mean is 3)
+            return False
+        if len(set((n - 1) // 10 for n in tk)) < 3:   # spread across ≥3 decades
+            return False
+        runs = sum(1 for a, b in zip(tk, tk[1:]) if b - a == 1)
+        if runs > 1:                                  # no sequences
+            return False
+        if tk in history:                             # not a past winning combo
+            return False
+        if any(len(set(tk) & r) >= 4 for r in recent):
+            return False
+        return True
+
+    # Pool of plausible, natural tickets only.
     candidates = []
     for _ in range(pool):
         tk = tuple(sorted(rng.sample(range(1, MAXN + 1), K)))
-        if tk in history:
-            continue                                   # skip exact past winners
-        if any(len(set(tk) & r) >= 4 for r in recent):
-            continue                                   # avoid echoing recent draws
-        candidates.append(tk)
-    candidates.sort(key=popularity_multiplier)         # least popular first
+        if is_natural(tk):
+            candidates.append(tk)
+        if len(candidates) >= 5000:
+            break
 
-    # Greedily take diverse, low-popularity tickets (differ by ≥3 numbers).
+    # Rank by popularity but tie-break randomly so equally-good tickets vary
+    # run to run (rounding stops the optimizer collapsing onto one extreme).
+    candidates.sort(key=lambda t: (round(popularity_multiplier(t), 1), rng.random()))
+
     chosen = []
     for tk in candidates:
-        if all(len(set(tk) - set(c)) >= 3 for c in chosen):
+        if all(len(set(tk) - set(c)) >= 3 for c in chosen):   # mutually diverse
             chosen.append(tk)
             if len(chosen) >= n_tickets:
                 break
 
-    avg_mult = mean([popularity_multiplier(t) for t in candidates])
-    print(f"  Generated from {len(candidates):,} random tickets; kept the {n_tickets} least")
-    print(f"  popular & mutually diverse. (Average random ticket popularity ≈ {avg_mult:.2f}x.)\n")
-    print(f"  {'ticket':28s} {'sum':>4s} {'pop':>6s} {'exp.co-winners':>15s}")
-    print("  " + "-" * 58)
+    avg_mult = mean([popularity_multiplier(t) for t in candidates]) if candidates else 1.0
+    print(f"  {len(candidates):,} natural candidates; kept the {len(chosen)} least-popular & diverse.")
+    print(f"  (Natural-ticket average popularity ≈ {avg_mult:.2f}x; birthday picks run ~10x+.)\n")
+    print(f"  {'ticket':30s} {'sum':>4s} {'low':>4s} {'pop':>6s} {'exp.co-win':>11s}")
+    print("  " + "-" * 60)
     results = []
     for tk in chosen:
         co = expected_cowinners(tk, tickets_sold)
         mlt = popularity_multiplier(tk)
-        print(f"  {str(list(tk)):28s} {sum(tk):4d} {mlt:5.2f}x {co:15.3f}")
+        low = sum(1 for n in tk if n <= 24)
+        print(f"  {str(list(tk)):30s} {sum(tk):4d} {low:4d} {mlt:5.2f}x {co:11.3f}")
         results.append({"numbers": list(tk), "popularity": mlt, "exp_cowinners": co})
 
-    # Reference: a pure-random ticket and a typical birthday ticket, for contrast.
     rnd = sorted(rng.sample(range(1, MAXN + 1), K))
-    print(f"\n  reference — pure random : {rnd}  pop {popularity_multiplier(rnd):.2f}x")
     bd = [4, 8, 12, 19, 23, 27]
+    print(f"\n  reference — pure random : {rnd}  pop {popularity_multiplier(rnd):.2f}x")
     print(f"  reference — birthday    : {bd}  pop {popularity_multiplier(bd):.2f}x "
-          f"(you'd split with ~{expected_cowinners(bd, tickets_sold):.2f} others)")
+          f"(≈{expected_cowinners(bd, tickets_sold):.2f} co-winners)")
+    print("\n  Re-run for a fresh set, or pass --seed N to reproduce one.")
     print()
     return results
 
@@ -446,9 +470,16 @@ def generate_tickets(draws, n_tickets=6, tickets_sold=2_000_000, pool=60000, see
 # ═══════════════════════════════════════════════════════════════════════
 
 def main():
+    import argparse
     here = os.path.dirname(os.path.abspath(__file__))
-    default_csv = os.path.join(here, "drawn_RO.csv")
-    csv_path = sys.argv[1] if len(sys.argv) > 1 else default_csv
+    ap = argparse.ArgumentParser(description="Romanian 6/49 honest analyzer + EV ticket optimizer")
+    ap.add_argument("csv", nargs="?", default=os.path.join(here, "drawn_RO.csv"),
+                    help="path to drawn_RO.csv")
+    ap.add_argument("--tickets", type=int, default=6, help="how many tickets to suggest")
+    ap.add_argument("--seed", type=int, default=None, help="fix RNG for reproducible tickets")
+    ap.add_argument("--sold", type=int, default=2_000_000, help="assumed tickets sold (for sharing math)")
+    args = ap.parse_args()
+    csv_path = args.csv
     if not os.path.exists(csv_path):
         print(f"CSV not found: {csv_path}\nUsage: python3 Loto_RO_v5.py [path/to/drawn_RO.csv]")
         sys.exit(1)
@@ -468,8 +499,9 @@ def main():
     report["fairness"] = section_fairness(draws)
     report["structure"] = section_structure(draws)
     report["backtest"] = section_backtest(draws)
-    report["ev"] = section_ev(draws)
-    report["tickets"] = generate_tickets(draws)
+    report["ev"] = section_ev(draws, tickets_sold=args.sold)
+    report["tickets"] = generate_tickets(draws, n_tickets=args.tickets,
+                                         tickets_sold=args.sold, seed=args.seed)
 
     out = os.path.join(here, "loto_v5_report.json")
     with open(out, "w") as f:
