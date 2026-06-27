@@ -1,0 +1,5 @@
+.DS_Store
+__pycache__/
+*.pyc
+loto_v5_report.json
+*.png
